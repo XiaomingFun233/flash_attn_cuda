@@ -103,7 +103,9 @@ __global__ void fa(float* Q,float* K,float* V,float* O,float* L,float* M){
     block_n is b_c
     N is d_model
 
-    m in d_model n in d_q k in d_v
+    m in d_model 
+    n in d_q 
+    k in d_v
 
     o_size = d_model x d_q
 
@@ -134,12 +136,12 @@ __global__ void fa(float* Q,float* K,float* V,float* O,float* L,float* M){
     if(g_idx < d_q*d_model){
         int data_num_block_q = d_q * block_m;//for q and o 
         int data_num_block_k = d_q * block_n;//for k v
-        int row_kv = ((g_idx / d_q)%block_n);
+        int row_kv = ((g_idx / d_q)%block_n);//locate the idx for smem
         int row_qo = ((g_idx / d_q)%block_m);
-        v[row_kv][g_idx % d_q] = V[g_idx];
-        k[row_kv][g_idx % d_q] = K[g_idx];
-        for(int iter = 0;iter < T_r;iter++){
-            q[row_qo][g_idx%d_q] = Q[g_idx % data_num_block_q + iter*block_m*d_q];
+        v[row_kv][g_idx % d_q] = V[g_idx];//each block load its own gmem to smem
+        k[row_kv][g_idx % d_q] = K[g_idx];//in paper it is step 6
+        for(int iter = 0;iter < T_r;iter++){//step 7
+            q[row_qo][g_idx%d_q] = Q[g_idx % data_num_block_q + iter*block_m*d_q];//step 8 
             o[row_kv][g_idx%d_q] = O[g_idx % data_num_block_q + iter*block_m*d_q];
             if(b_idx < block_m){
                 l[b_idx % block_m] = L[b_idx % block_m + iter*block_m];
