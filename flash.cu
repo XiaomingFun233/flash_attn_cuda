@@ -1,4 +1,4 @@
-#include "../coding/common.h"
+#include "common/common.h"
 #include <cooperative_groups.h>
 #include <cuda_runtime.h>
 #include <stdio.h>
