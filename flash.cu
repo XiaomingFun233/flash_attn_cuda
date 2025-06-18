@@ -1,13 +1,15 @@
 #include "common/common.h"
 #include <cooperative_groups.h>
+#include <cfloat>
 #include <cuda_runtime.h>
 #include <stdio.h>
-#include <stdlib.h>  
+#include <stdlib.h>
 #include <time.h>
 #include <math.h>
-#define FETCH_FLOAT4(pointer) (reinterpret_cast<float4*>(&(pointer))[0])
+
+
 float* h_attention(const float* Q, const float* K, const float* V,
-                 int n, int m, int d_k, int d_v) {
+                   int n, int m, int d_k, int d_v) {
     // 分配注意力分数矩阵内存 (n x m)
     float* scores = (float*)malloc(n * m * sizeof(float));
     if (!scores) return NULL;
@@ -27,8 +29,7 @@ float* h_attention(const float* Q, const float* K, const float* V,
     float scale = sqrtf((float)d_k);
     for (int i = 0; i < n * m; ++i) {
         scores[i] /= scale;
-    }     
-     //你是大猪头 //你是大猪头 //你是大猪头 //你是大猪头 //你是大猪头 //你是大猪头 
+    }
 
     // 对每行进行softmax归一化
     for (int i = 0; i < n; ++i) {
@@ -77,243 +78,242 @@ float* h_attention(const float* Q, const float* K, const float* V,
 
     return output;
 }
-//当前困难是处理bm 和 bn 不等的情况我怎么把线程块映射到数据上面
-template <unsigned int blockSize>
-__device__ __forceinline__ float warpReduceSum(float sum) {
-    if (blockSize >= 32)sum += __shfl_down_sync(0xffffffff, sum, 16); // 0-16, 1-17, 2-18, etc.
-    if (blockSize >= 16)sum += __shfl_down_sync(0xffffffff, sum, 8);// 0-8, 1-9, 2-10, etc.
-    if (blockSize >= 8)sum += __shfl_down_sync(0xffffffff, sum, 4);// 0-4, 1-5, 2-6, etc.
-    if (blockSize >= 4)sum += __shfl_down_sync(0xffffffff, sum, 2);// 0-2, 1-3, 4-6, 5-7, etc.
-    if (blockSize >= 2)sum += __shfl_down_sync(0xffffffff, sum, 1);// 0-1, 2-3, 4-5, etc.
-    return sum;
-}
-/*、
-    int stride_qm,int stride_qk,
-    int stride_kk,int stride_kn,
-    int stride_vm,int stride_vn
-*/
+
 template<const int num_threads_x,
         const int num_threads_y,
-        const int d_model,
-        const int d_q,
-        const int block_m,
-        const int block_n
+        const int N,
+        const int d,
+        const int b_r,
+        const int b_c
 >
 __global__ void fa(float* Q,float* K,float* V,float* O,float* L,float* M){
     /*
-    block_m is b_r
-    block_n is b_c
-    N is d_model
+    parameter: name base on paper
 
-    m in d_model 
-    n in d_q 
+    m in N
+    n in d_k
     k in d_v
 
-    o_size = d_model x d_q
+    o_size = N x d
 
-    q_size = d_model x d_q
-    k_size = d_model x d_q
-    v_size = d_model x d_q
+    q_size = N x d
+    k_size = N x d
+    v_size = N x d
     */
 
-    __shared__ float q[block_m][d_q];
-    __shared__ float k[block_n][d_q];
-    __shared__ float v[block_n][d_q];
-    __shared__ float o[block_m][d_q];
-    __shared__ float s[block_m][block_n];
-
-    __shared__ float l[block_m];
-    __shared__ float m[block_m];
-    int thread_num_inblock = num_threads_x*num_threads_y;//now is one thread for one data element
-    int T_r =  (int)(d_model / block_m);
-    int T_c =  (int)(d_model / block_n);
-    //global idx
-    unsigned int g_idx = threadIdx.x + threadIdx.y * blockDim.x + 
-                    (blockIdx.x + blockIdx.y * gridDim.x) * (blockDim.x * blockDim.y);
-    unsigned int b_idx = threadIdx.x + threadIdx.y*blockDim.x;
-    unsigned int warpId = b_idx / 32;
-    unsigned int laneId = b_idx % 32;
-    //assumption that is one data for one thread and block_m == block_n
-    
+    //SRAM allocation step 3 in paper
+    __shared__ float q[b_r][d];
+    __shared__ float k[b_c][d];
+    __shared__ float v[b_c][d];
+    int T_r =  (int)(N / b_r); // divide operations are slow in GPU find a way to replace it
+    int T_c =  (int)(N / b_c);
+    //SRAM allocation step 4 in paper
+    __shared__ float o[b_r][d];
+    __shared__ float s[b_r][b_c];
+    __shared__ float l[b_r];
+    __shared__ float m[b_r];
+    float scale = 1.0f / sqrtf((float)d);
+    //calculate the thread num in block and the thread num in row and col
+    int thread_num_inblock = num_threads_x*num_threads_y;
+    unsigned int b_idx = threadIdx.x + threadIdx.y*blockDim.x;// 2D matrix but 1D idx
+    int data_num_block_q = d * b_r;//for q and o
+    int data_num_block_k = d * b_c;//for k v
+    //assumption that is one data for one thread and b_r == b_c
+   
     //load gmem to smem
-    if(g_idx < d_q*d_model){
-        int data_num_block_q = d_q * block_m;//for q and o 
-        int data_num_block_k = d_q * block_n;//for k v
-        int row_kv = ((g_idx / d_q)%block_n);//locate the idx for smem
-        int row_qo = ((g_idx / d_q)%block_m);
-        v[row_kv][g_idx % d_q] = V[g_idx];//each block load its own gmem to smem
-        k[row_kv][g_idx % d_q] = K[g_idx];//in paper it is step 6 and keep k in form with q
+    for(int j = 0;j < T_c;j++){//step 5
+        for(int idx = b_idx;idx < data_num_block_k;idx += blockDim.x * blockDim.y){
+            
+            v[idx / d][idx % d] = V[idx  + j * data_num_block_k];//each block load its own gmem to smem
+            k[idx / d][idx % d] = K[idx  + j * data_num_block_k];//in paper it is step 6
+        }
+        __syncthreads();
         for(int iter = 0;iter < T_r;iter++){//step 7
-            q[row_qo][g_idx%d_q] = Q[g_idx % data_num_block_q + iter*block_m*d_q];//step 8 
-            o[row_kv][g_idx%d_q] = O[g_idx % data_num_block_q + iter*block_m*d_q];
-            if(b_idx < 32){//use 32 to avoid warp divide
-                l[b_idx % block_m] = L[b_idx % block_m + iter*block_m];
-                m[b_idx % block_m] = M[b_idx % block_m + iter*block_m];
+           for (int i = b_idx; i < b_r * d; i += blockDim.x * blockDim.y) {
+                int row = i / d;
+                int col = i % d;
+                q[row][col] = Q[iter * b_r * d + i];
+                o[row][col] = O[iter * b_r * d + i];
             }
-            //do matrix multiply in smem
+
+            for(int idx = b_idx;idx < b_r;idx += blockDim.x * blockDim.y){
+                l[idx] = L[idx + iter*b_r];
+                m[idx] = M[idx + iter*b_r];
+            }
+            __syncthreads();
+            //mat multiply
+            //semm step 9
             int tx = threadIdx.x;
             int ty = threadIdx.y;
-            if(b_idx < d_q*block_m){//if d_q*block_m is not a multiple of 32, cause warp divide 
-                for(int z = 0;z < block_n;z++){
-                    float sum = 0;
-                    sum = q[ty][tx]*k[z][tx];
-                    if (d_q >= 32)sum += __shfl_down_sync(0xffffffff, sum, 16); // 0-16, 1-17, 2-18, etc.
-                    if (d_q >= 16)sum += __shfl_down_sync(0xffffffff, sum, 8);// 0-8, 1-9, 2-10, etc.
-                    if (d_q >= 8)sum += __shfl_down_sync(0xffffffff, sum, 4);// 0-4, 1-5, 2-6, etc.
-                    if (d_q >= 4)sum += __shfl_down_sync(0xffffffff, sum, 2);// 0-2, 1-3, 4-6, 5-7, etc.
-                    if (d_q >= 2)sum += __shfl_down_sync(0xffffffff, sum, 1);// 0-1, 2-3, 4-5, etc.
-                    s[b_idx / d_q][z] = sum;//s_ij
-                    __syncthreads();
-                    sum = 0;
+           
+            for (int row = ty; row < b_r; row += blockDim.y) {
+                for (int col = tx; col < b_c; col += blockDim.x) {
+                    float sum = 0.0f;
+                    for (int k_dim = 0; k_dim < d; k_dim++) {
+                        sum += q[row][k_dim] * k[col][k_dim];
+                    }
+                    // *** BUG FIX 1: 增加了缩放步骤 ***
+                    s[row][col] = sum * scale;
                 }
             }
-            
+            __syncthreads(); // Essential: All threads must finish computing their part of 's'
+           
             //step 10
             //calculate the max
-            __shared__ float m_up[block_m];
-            __shared__ float l_up[block_m];
-            if(b_idx < block_m)//warp divide
-            { //bidx = 0,1 will do that
-                float big = INT_MIN;
-                for(int z=0;z < block_n;z++){
-                    big = max(big,s[b_idx][z]);
+            __shared__ float m_up[b_r];
+            __shared__ float l_up[b_r];
+            if (tx == 0) {
+                for (int row = ty; row < b_r; row += blockDim.y) {
+                    // 1. 找最大值 m_up
+                    float row_max = -FLT_MAX;
+                    for (int col = 0; col < b_c; col++) {
+                        if (s[row][col] > row_max) {
+                            row_max = s[row][col];
+                        }
+                    }
+                    m_up[row] = row_max;
+
+                    // 2. 计算 P_ij 并求和得到 l_up
+                    float row_sum_exp = 0.0f;
+                    for (int col = 0; col < b_c; col++) {
+                        float p_val = __expf(s[row][col] - row_max);
+                        s[row][col] = p_val; // 将 s 矩阵原地更新为 P 矩阵
+                        row_sum_exp += p_val;
+                    }
+                    l_up[row] = row_sum_exp;
                 }
-                m_up[b_idx] = big;
             }
             __syncthreads();
-            //calculate the p_ij
-            if(b_idx < block_m * block_n){
-                int row = b_idx / block_n;
-                int col = b_idx % block_n;
-                s[row][col] = __expf(s[row][col]-m_up[row]);//p_ij
-            }
-            __syncthreads();
-            //calculate the l_up_ij
-            if(b_idx < block_m)//cause warp divide
-            {
-                float sum = 0;
-                for(int z=0;z < block_n;z++){
-                    sum += s[b_idx][z];//l_up_ij
-                }
-                l_up[b_idx] = sum;
-            }
-            __syncthreads();
+
             //step 11
-            __shared__ float m_new[block_m];
-            __shared__ float l_new[block_m];
-            if(b_idx == 0){
-                for(int i=0;i < block_m;i++){
-                    m_new[i] = max(m[i],m_up[i]);
-                    l_new[i] = __expf(m[i]-m_new[i])*l[i] + l_up[i]*__expf(m_up[i]-m_new[i]);
+            __shared__ float m_new[b_r];
+            __shared__ float l_new[b_r];
+            if (tx == 0) {
+                for (int row = ty; row < b_r; row += blockDim.y) {
+                    m_new[row] = fmaxf(m[row], m_up[row]);
+                    l_new[row] = __expf(m[row] - m_new[row]) * l[row] + __expf(m_up[row] - m_new[row]) * l_up[row];
                 }
-                
             }
             __syncthreads();
             //calculate o_i
-            __shared__ float pv[block_m][d_q];
-            int row_s = b_idx / block_n;
-            int col_s = b_idx % block_n;
-            __shared__ float acc[block_m][block_n];
-            //mat mutliply
-            for(int z = 0;z < d_q;z++){
-                if(b_idx < block_m*block_n){
-                    acc[row_s][col_s] = s[row_s][col_s]*v[col_s][z];//p_ij*v_ij
-                }
-                
-                //__syncthreads();
-                //reduce it or just sum it up
-                if(b_idx < block_m*block_n && col_s == 0){
-                    float sum = 0;
-                    for(int i=0;i < block_n;i++){
-                        sum += acc[row_s][i];
-                    }
-                    pv[row_s][z] = sum;
-                }
-                __syncthreads();
-                if(b_idx < block_m*block_n){
-                    acc[row_s][col_s] = 0;
-                }
-            }
-            o[row_qo][g_idx%d_q] = l[row_qo]*__expf(m[row_qo]-m_new[row_qo])*o[row_qo][g_idx%d_q] + __expf(m_up[row_qo]-m_new[row_qo])*pv[row_qo][g_idx%d_q];
-            //write back L and M
-            if(b_idx < block_m){
-                L[b_idx % block_m + iter*block_m] = l_new[b_idx];
-                M[b_idx % block_m + iter*block_m] = m_new[b_idx];
-            }
-            
-            //write back to o
-            O[g_idx % data_num_block_q + iter*block_m*d_q] = o[row_qo][g_idx%d_q];
-            
+            __shared__ float pv[b_r][d];
+            // Each thread (ty, tx) will be responsible for computing one element pv[ty][tx].
+            // This requires iterating through the inner dimension 'b_c'.
 
+            for (int row = ty; row < b_r; row += blockDim.y) {
+                for (int col = tx; col < d; col += blockDim.x) {
+                    float pv_sum = 0.0f;
+                    for (int k_dim = 0; k_dim < b_c; k_dim++) {
+                        pv_sum += s[row][k_dim] * v[k_dim][col];
+                    }
+                    pv[row][col] = pv_sum;
+                }
+            }
+            __syncthreads();
+            for (int row = ty; row < b_r; row += blockDim.y) {
+                float m_old = m[row];
+                float l_old = l[row];
+                float m_new_val = m_new[row];
+                float l_new_val = l_new[row];
+
+                for (int col = tx; col < d; col += blockDim.x) {
+                    float o_old = o[row][col];
+                    float pv_val = pv[row][col];
+                    // 更新公式
+                    o[row][col] = (l_old * __expf(m_old - m_new_val) * o_old + __expf(m_up[row] - m_new_val) * pv_val) / l_new_val;
+                }
+            }
+             __syncthreads();
+             if (tx == 0) {
+                 for (int row = ty; row < b_r; row += blockDim.y) {
+                    l[row] = l_new[row];
+                    m[row] = m_new[row];
+                 }
+            }
+            __syncthreads();
+
+            for (int i = b_idx; i < b_r * d; i += blockDim.x * blockDim.y) {
+                O[iter * b_r * d + i] = o[i / d][i % d];
+            }
+            for (int i = b_idx; i < b_r; i += blockDim.x * blockDim.y) {
+                L[iter * b_r + i] = l[i];
+                M[iter * b_r + i] = m[i];
+            }
+            __syncthreads();
         }
+        
     }
-    
-    //debug 思路 只保留少数线程进行计算即可
-}//线程分配的困难，因为不是一个块无法共享内存，无法使用sram进行通信，所以划分块和数据的索引变成了最大的困难，目前的方法每个块里面在一些计算阶段都会有很多闲置线程
+   
+   
+}//thread block must bigger than max(b_r,b_c) * d
+
 int main(int argc,char** argv){
     int dev = 0;
-	cudaDeviceProp deviceProp;
-	CHECK(cudaGetDeviceProperties(&deviceProp,dev));
-	CHECK(cudaSetDevice(dev));
+    cudaDeviceProp deviceProp;
+    CHECK(cudaGetDeviceProperties(&deviceProp,dev));
+    CHECK(cudaSetDevice(dev));
     //set datasize
-    constexpr int d_q = 512;
-    constexpr int d_model = 2048;
+    constexpr int d = 512;
+    constexpr int N = 2048;
     //init host data Q K V
     float* h_q;float* h_k;float* h_v;
-    h_q = (float*)malloc(d_q*d_model*sizeof(float));
-    h_k = (float*)malloc(d_q*d_model*sizeof(float));
-    h_v = (float*)malloc(d_q*d_model*sizeof(float));
-    for(int i=0;i < d_model*d_q;i++){
-        h_q[i] = rand() % d_model;
+    h_q = (float*)malloc(d*N*sizeof(float));
+    h_k = (float*)malloc(d*N*sizeof(float));
+    h_v = (float*)malloc(d*N*sizeof(float));
+    for(int i=0;i < N*d;i++){
+        h_q[i] = rand() % N;
+        h_q[i] /= d;
     }
-    for(int i=0;i < d_model*d_q;i++){
-        h_k[i] = rand() % d_model;
+    for(int i=0;i < N*d;i++){
+        h_k[i] = rand() % N;
+        h_k[i] /= d;    
     }
-    for(int i=0;i < d_model*d_q;i++){
-        h_v[i] = rand() % d_model;
+    for(int i=0;i < N*d;i++){
+        h_v[i] = rand() % N;
+        h_v[i] /= d;
     }
     //init host data O L M
     float* h_O;float*h_L;float*h_M;
-    h_O = (float*)malloc(d_q*d_model*sizeof(float));
-    h_L = (float*)malloc(d_model*sizeof(float));
-    h_M = (float*)malloc(d_model*sizeof(float));
-    for(int i=0;i < d_model*d_q;i++){
-        h_O[i] = rand() % d_model;
+    h_O = (float*)malloc(d*N*sizeof(float));
+    h_L = (float*)malloc(N*sizeof(float));
+    h_M = (float*)malloc(N*sizeof(float));
+    for(int i=0;i < N*d;i++){
+        h_O[i] = 0;
     }
-    for(int i=0;i < d_model;i++){
-        h_L[i] = rand() % d_model;
+    for(int i=0;i < N;i++){
+        h_L[i] = 0;
     }
-    for(int i=0;i < d_model;i++){
-        h_M[i] = rand() % d_model;
+    for(int i=0;i < N;i++){
+        h_M[i] = -FLT_MAX;
     }
     //init device data Q K V
     float* dev_q;float* dev_k;float* dev_v;
-    CHECK(cudaMalloc((float**)&dev_q,d_q*d_model*sizeof(float)));
-    CHECK(cudaMalloc((float**)&dev_k,d_q*d_model*sizeof(float)));
-    CHECK(cudaMalloc((float**)&dev_v,d_q*d_model*sizeof(float)));
+    CHECK(cudaMalloc((float**)&dev_q,d*N*sizeof(float)));
+    CHECK(cudaMalloc((float**)&dev_k,d*N*sizeof(float)));
+    CHECK(cudaMalloc((float**)&dev_v,d*N*sizeof(float)));
     float* dev_O;float* dev_L;float* dev_M;
-    CHECK(cudaMalloc((float**)&dev_O,d_q*d_model*sizeof(float)));
-    CHECK(cudaMalloc((float**)&dev_L,d_model*sizeof(float)));
-    CHECK(cudaMalloc((float**)&dev_M,d_model*sizeof(float)));
+    CHECK(cudaMalloc((float**)&dev_O,d*N*sizeof(float)));
+    CHECK(cudaMalloc((float**)&dev_L,N*sizeof(float)));
+    CHECK(cudaMalloc((float**)&dev_M,N*sizeof(float)));
     //transfer data to device
-    CHECK(cudaMemcpy(dev_q,h_q,d_q*d_model*sizeof(float),cudaMemcpyHostToDevice));
-    CHECK(cudaMemcpy(dev_k,h_k,d_q*d_model*sizeof(float),cudaMemcpyHostToDevice));
-    CHECK(cudaMemcpy(dev_v,h_v,d_q*d_model*sizeof(float),cudaMemcpyHostToDevice));
-    CHECK(cudaMemcpy(dev_O,h_O,d_q*d_model*sizeof(float),cudaMemcpyHostToDevice));
-    CHECK(cudaMemcpy(dev_L,h_L,d_model*sizeof(float),cudaMemcpyHostToDevice));
-    CHECK(cudaMemcpy(dev_M,h_M,d_model*sizeof(float),cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(dev_q,h_q,d*N*sizeof(float),cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(dev_k,h_k,d*N*sizeof(float),cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(dev_v,h_v,d*N*sizeof(float),cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(dev_O,h_O,d*N*sizeof(float),cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(dev_L,h_L,N*sizeof(float),cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(dev_M,h_M,N*sizeof(float),cudaMemcpyHostToDevice));
     //calculate b_r and b_c
-    constexpr int M = 4096;//size of sram 
-    constexpr int b_c = 2;//(int)M / (4*d_q);
-    constexpr int b_r = 2;//(int)min(d_q,b_c);
-    dim3 block(512,1);
-    fa<512,1,d_model,d_q,b_r,b_c><<<1,block>>>(dev_q,dev_k,dev_v,dev_O,dev_L,dev_M);
-    CHECK(cudaMemcpy(h_O,dev_O,d_q*d_model*sizeof(float),cudaMemcpyDeviceToHost));
-    CHECK(cudaMemcpy(h_L,dev_L,d_model*sizeof(float),cudaMemcpyDeviceToHost));
-    CHECK(cudaMemcpy(h_M,dev_M,d_model*sizeof(float),cudaMemcpyDeviceToHost));//now got the answer
+    constexpr int M = 10000;//size of sram
+    constexpr int b_c = 4;//(int)M / (4*d);
+    constexpr int b_r = 4;//(int)min(d,b_c);
+    dim3 block(512,2);
+    fa<512,2,N,d,b_r,b_c><<<1,block>>>(dev_q,dev_k,dev_v,dev_O,dev_L,dev_M);
+    CHECK(cudaMemcpy(h_O,dev_O,d*N*sizeof(float),cudaMemcpyDeviceToHost));
+    CHECK(cudaMemcpy(h_L,dev_L,N*sizeof(float),cudaMemcpyDeviceToHost));
+    CHECK(cudaMemcpy(h_M,dev_M,N*sizeof(float),cudaMemcpyDeviceToHost));//now got the answer
     //calculate on host
-    float* ans_h = (float*)malloc(d_model*d_q*sizeof(float));
-    ans_h = h_attention(h_q,h_k,h_v,d_model,d_q,d_q,d_q);
+    float* ans_h = (float*)malloc(N*d*sizeof(float));
+    ans_h = h_attention(h_q,h_k,h_v,N,N,d,d);
     for(int i=0;i < 32;i++){
         printf("gpu g[%d] ans is :%f\n",i,h_O[i]);
         printf("cpu c[%d] ans is :%f\n",i,ans_h[i]);
