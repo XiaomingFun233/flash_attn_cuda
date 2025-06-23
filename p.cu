@@ -76,7 +76,7 @@ __global__ void fa(float* Q, float* K, float* V, float* O, float* L, float* M){
                     for (int k_dim = 0; k_dim < d; k_dim++) {
                         sum += q[row][k_dim] * k[col][k_dim];
                     }
-                    // *** BUG FIX 1: 增加了缩放步骤 ***
+                    // *** BUG FIX 1: Added scaling step ***
                     s[row][col] = sum * scale;
                 }
             }
@@ -88,7 +88,7 @@ __global__ void fa(float* Q, float* K, float* V, float* O, float* L, float* M){
             __shared__ float l_up[b_r];
             if (tx == 0) {
                 for (int row = ty; row < b_r; row += blockDim.y) {
-                    // 1. 找最大值 m_up
+                    // 1. Find maximum value m_up
                     float row_max = -FLT_MAX;
                     for (int col = 0; col < b_c; col++) {
                         if (s[row][col] > row_max) {
@@ -97,11 +97,11 @@ __global__ void fa(float* Q, float* K, float* V, float* O, float* L, float* M){
                     }
                     m_up[row] = row_max;
 
-                    // 2. 计算 P_ij 并求和得到 l_up
+                    // 2. Calculate P_ij and sum to get l_up
                     float row_sum_exp = 0.0f;
                     for (int col = 0; col < b_c; col++) {
                         float p_val = __expf(s[row][col] - row_max);
-                        s[row][col] = p_val; // 将 s 矩阵原地更新为 P 矩阵
+                        s[row][col] = p_val; // Update s matrix in-place to become P matrix
                         row_sum_exp += p_val;
                     }
                     l_up[row] = row_sum_exp;
@@ -143,7 +143,7 @@ __global__ void fa(float* Q, float* K, float* V, float* O, float* L, float* M){
                 for (int col = tx; col < d; col += blockDim.x) {
                     float o_old = o[row][col];
                     float pv_val = pv[row][col];
-                    // 更新公式
+                    // Update formula
                     o[row][col] = (l_old * __expf(m_old - m_new_val) * o_old + __expf(m_up[row] - m_new_val) * pv_val) / l_new_val;
                 }
             }
@@ -170,40 +170,40 @@ __global__ void fa(float* Q, float* K, float* V, float* O, float* L, float* M){
 }
 
 torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V) {
-    // 确定内核参数
+    // Define kernel parameters
     const int num_threads_x = 512;
     const int num_threads_y = 2;
     const int b_r = 4;
     const int b_c = 4;
     
-    // 获取输入尺寸
+    // Get input dimensions
     const int B = Q.size(0); const int nh = Q.size(1);
     const int N = Q.size(2); const int d = Q.size(3);
     
-    // 初始化输出和中间张量
+    // Initialize output and intermediate tensors
     auto O = torch::zeros_like(Q);
     auto L = torch::zeros({B, nh, N});
     auto M = torch::full({B, nh, N}, -INFINITY);
     torch::Device device(torch::kCUDA);
     L = L.to(device); M = M.to(device);
     
-    // 打印SRAM使用信息
+    // Print SRAM usage information
     const int sram_size = (b_r * d * sizeof(float)) + (b_c * d * sizeof(float)) + 
                          (b_c * d * sizeof(float)) + (b_r * d * sizeof(float)) + 
                          (b_r * b_c * sizeof(float)) + (b_r * sizeof(float)) + 
                          (b_r * sizeof(float));
     int max_sram_size;
     cudaDeviceGetAttribute(&max_sram_size, cudaDevAttrMaxSharedMemoryPerBlock, 0);
-    printf("最大共享内存: %d字节, 请求共享内存: %d字节\n", max_sram_size, sram_size);
+    printf("Maximum shared memory: %d bytes, Requested shared memory: %d bytes\n", max_sram_size, sram_size);
     
-    // 设置CUDA内核启动参数
+    // Set CUDA kernel launch parameters
     dim3 grid_dim(B, nh);  // batch_size x num_heads
     dim3 block_dim(num_threads_x, num_threads_y);
     
-    // 为每个批次和头部启动内核
+    // Launch kernel for each batch and head
     for (int b = 0; b < B; b++) {
         for (int h = 0; h < nh; h++) {
-            // 获取当前批次和头部的数据指针
+            // Get data pointers for current batch and head
             float* q_ptr = Q.index({b, h}).data_ptr<float>();
             float* k_ptr = K.index({b, h}).data_ptr<float>();
             float* v_ptr = V.index({b, h}).data_ptr<float>();
@@ -211,17 +211,17 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V) {
             float* l_ptr = L.index({b, h}).data_ptr<float>();
             float* m_ptr = M.index({b, h}).data_ptr<float>();
             
-            // 启动fa内核
+            // Launch fa kernel
             fa<num_threads_x, num_threads_y, 2048, 512, b_r, b_c><<<1, block_dim>>>(
                 q_ptr, k_ptr, v_ptr, o_ptr, l_ptr, m_ptr
             );
         }
     }
     
-    // 检查CUDA错误
+    // Check for CUDA errors
     cudaError_t error = cudaGetLastError();
     if (error != cudaSuccess) {
-        printf("CUDA错误: %s\n", cudaGetErrorString(error));
+        printf("CUDA error: %s\n", cudaGetErrorString(error));
     }
     
     return O;
