@@ -17,6 +17,36 @@ template<const int num_threads_x,
 >
 __global__ void fa(float* Q, float* K, float* V, float* O, float* L, float* M);
 
+// Declare fa_op1 kernel function
+template<const int num_threads_x,
+        const int num_threads_y,
+        const int N,
+        const int d,
+        const int b_r,
+        const int b_c
+>
+__global__ void fa_op1(float* Q, float* K, float* V, float* O, float* L, float* M);
+
+// Declare fa_op2 kernel function
+template<const int num_threads_x,
+        const int num_threads_y,
+        const int N,
+        const int d,
+        const int b_r,
+        const int b_c
+>
+__global__ void fa_op2(float* Q, float* K, float* V, float* O, float* L, float* M);
+
+// Declare fa_op3 kernel function
+template<const int num_threads_x,
+        const int num_threads_y,
+        const int N,
+        const int d,
+        const int b_r,
+        const int b_c
+>
+__global__ void fa_op3(float* Q, float* K, float* V, float* O, float* L, float* M);
+
 // Declare fa_v2 kernel function
 template<
     const int N,
@@ -170,27 +200,48 @@ int main(int argc, char** argv) {
     // Initialize host output data
     float* h_O1 = (float*)malloc(d * N * sizeof(float));  // fa output
     float* h_O2 = (float*)malloc(d * N * sizeof(float));  // fa_v2 output
+    float* h_O3 = (float*)malloc(d * N * sizeof(float));  // fa_op1 output
+    float* h_O4 = (float*)malloc(d * N * sizeof(float));  // fa_op2 output
+    float* h_O5 = (float*)malloc(d * N * sizeof(float));  // fa_op3 output
     float* h_L1 = (float*)malloc(N * sizeof(float));
     float* h_L2 = (float*)malloc(N * sizeof(float));
+    float* h_L3 = (float*)malloc(N * sizeof(float));
+    float* h_L4 = (float*)malloc(N * sizeof(float));
+    float* h_L5 = (float*)malloc(N * sizeof(float));
     float* h_M1 = (float*)malloc(N * sizeof(float));
     float* h_M2 = (float*)malloc(N * sizeof(float));
+    float* h_M3 = (float*)malloc(N * sizeof(float));
+    float* h_M4 = (float*)malloc(N * sizeof(float));
+    float* h_M5 = (float*)malloc(N * sizeof(float));
     
     // Initialize to 0 and -FLT_MAX
     for (int i = 0; i < N * d; i++) {
         h_O1[i] = 0;
         h_O2[i] = 0;
+        h_O3[i] = 0;
+        h_O4[i] = 0;
+        h_O5[i] = 0;
     }
     for (int i = 0; i < N; i++) {
         h_L1[i] = 0;
         h_L2[i] = 0;
+        h_L3[i] = 0;
+        h_L4[i] = 0;
+        h_L5[i] = 0;
         h_M1[i] = -FLT_MAX;
         h_M2[i] = -FLT_MAX;
+        h_M3[i] = -FLT_MAX;
+        h_M4[i] = -FLT_MAX;
+        h_M5[i] = -FLT_MAX;
     }
     
     // Initialize device data
     float *dev_q, *dev_k, *dev_v;
     float *dev_O1, *dev_L1, *dev_M1;  // fa output
     float *dev_O2, *dev_L2, *dev_M2;  // fa_v2 output
+    float *dev_O3, *dev_L3, *dev_M3;  // fa_op1 output
+    float *dev_O4, *dev_L4, *dev_M4;  // fa_op2 output
+    float *dev_O5, *dev_L5, *dev_M5;  // fa_op3 output
     
     // Allocate device memory
     CHECK(cudaMalloc((float**)&dev_q, d * N * sizeof(float)));
@@ -205,6 +256,18 @@ int main(int argc, char** argv) {
     CHECK(cudaMalloc((float**)&dev_L2, N * sizeof(float)));
     CHECK(cudaMalloc((float**)&dev_M2, N * sizeof(float)));
     
+    CHECK(cudaMalloc((float**)&dev_O3, d * N * sizeof(float)));
+    CHECK(cudaMalloc((float**)&dev_L3, N * sizeof(float)));
+    CHECK(cudaMalloc((float**)&dev_M3, N * sizeof(float)));
+    
+    CHECK(cudaMalloc((float**)&dev_O4, d * N * sizeof(float)));
+    CHECK(cudaMalloc((float**)&dev_L4, N * sizeof(float)));
+    CHECK(cudaMalloc((float**)&dev_M4, N * sizeof(float)));
+    
+    CHECK(cudaMalloc((float**)&dev_O5, d * N * sizeof(float)));
+    CHECK(cudaMalloc((float**)&dev_L5, N * sizeof(float)));
+    CHECK(cudaMalloc((float**)&dev_M5, N * sizeof(float)));
+    
     // Transfer data to device
     CHECK(cudaMemcpy(dev_q, h_q, d * N * sizeof(float), cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(dev_k, h_k, d * N * sizeof(float), cudaMemcpyHostToDevice));
@@ -217,6 +280,18 @@ int main(int argc, char** argv) {
     CHECK(cudaMemcpy(dev_O2, h_O2, d * N * sizeof(float), cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(dev_L2, h_L2, N * sizeof(float), cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(dev_M2, h_M2, N * sizeof(float), cudaMemcpyHostToDevice));
+    
+    CHECK(cudaMemcpy(dev_O3, h_O3, d * N * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(dev_L3, h_L3, N * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(dev_M3, h_M3, N * sizeof(float), cudaMemcpyHostToDevice));
+    
+    CHECK(cudaMemcpy(dev_O4, h_O4, d * N * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(dev_L4, h_L4, N * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(dev_M4, h_M4, N * sizeof(float), cudaMemcpyHostToDevice));
+    
+    CHECK(cudaMemcpy(dev_O5, h_O5, d * N * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(dev_L5, h_L5, N * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(dev_M5, h_M5, N * sizeof(float), cudaMemcpyHostToDevice));
     
     // Calculate b_r and b_c
     constexpr int M = 10000;  // Shared memory size
@@ -271,6 +346,66 @@ int main(int argc, char** argv) {
     CHECK(cudaMemcpy(h_L2, dev_L2, N * sizeof(float), cudaMemcpyDeviceToHost));
     CHECK(cudaMemcpy(h_M2, dev_M2, N * sizeof(float), cudaMemcpyDeviceToHost));
     
+    // === Execute fa_op1 kernel ===
+    printf("\n==== Running fa_op1 kernel ====\n");
+    cudaEventRecord(start);
+    
+    fa_op1<512, 2, N, d, b_r, b_c><<<1, block>>>(dev_q, dev_k, dev_v, dev_O3, dev_L3, dev_M3);
+    
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    float fa_op1_time = 0;
+    cudaEventElapsedTime(&fa_op1_time, start, stop);
+    printf("fa_op1 kernel execution time: %.3f ms\n", fa_op1_time);
+    
+    CHECK(cudaGetLastError());
+    CHECK(cudaDeviceSynchronize());
+    
+    // Copy results back to host
+    CHECK(cudaMemcpy(h_O3, dev_O3, d * N * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK(cudaMemcpy(h_L3, dev_L3, N * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK(cudaMemcpy(h_M3, dev_M3, N * sizeof(float), cudaMemcpyDeviceToHost));
+    
+    // === Execute fa_op2 kernel ===
+    printf("\n==== Running fa_op2 kernel ====\n");
+    cudaEventRecord(start);
+    
+    fa_op2<512, 2, N, d, b_r, b_c><<<1, block>>>(dev_q, dev_k, dev_v, dev_O4, dev_L4, dev_M4);
+    
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    float fa_op2_time = 0;
+    cudaEventElapsedTime(&fa_op2_time, start, stop);
+    printf("fa_op2 kernel execution time: %.3f ms\n", fa_op2_time);
+    
+    CHECK(cudaGetLastError());
+    CHECK(cudaDeviceSynchronize());
+    
+    // Copy results back to host
+    CHECK(cudaMemcpy(h_O4, dev_O4, d * N * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK(cudaMemcpy(h_L4, dev_L4, N * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK(cudaMemcpy(h_M4, dev_M4, N * sizeof(float), cudaMemcpyDeviceToHost));
+    
+    // === Execute fa_op3 kernel ===
+    printf("\n==== Running fa_op3 kernel ====\n");
+    cudaEventRecord(start);
+    
+    fa_op3<512, 2, N, d, b_r, b_c><<<1, block>>>(dev_q, dev_k, dev_v, dev_O5, dev_L5, dev_M5);
+    
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    float fa_op3_time = 0;
+    cudaEventElapsedTime(&fa_op3_time, start, stop);
+    printf("fa_op3 kernel execution time: %.3f ms\n", fa_op3_time);
+    
+    CHECK(cudaGetLastError());
+    CHECK(cudaDeviceSynchronize());
+    
+    // Copy results back to host
+    CHECK(cudaMemcpy(h_O5, dev_O5, d * N * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK(cudaMemcpy(h_L5, dev_L5, N * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK(cudaMemcpy(h_M5, dev_M5, N * sizeof(float), cudaMemcpyDeviceToHost));
+    
     // === Calculate CPU reference result ===
     printf("\n==== Computing CPU reference result ====\n");
     clock_t cpu_start = clock();
@@ -289,10 +424,22 @@ int main(int argc, char** argv) {
     printf("Verifying fa_v2 results...\n");
     bool fa_v2_correct = verify_results(h_O2, cpu_result, N * d);
     
+    printf("Verifying fa_op1 results...\n");
+    bool fa_op1_correct = verify_results(h_O3, cpu_result, N * d);
+    
+    printf("Verifying fa_op2 results...\n");
+    bool fa_op2_correct = verify_results(h_O4, cpu_result, N * d);
+    
+    printf("Verifying fa_op3 results...\n");
+    bool fa_op3_correct = verify_results(h_O5, cpu_result, N * d);
+    
     // Calculate FLOPS
     double total_flops = calculate_attention_flops(N, d);
     double fa_gflops = calculate_gflops(total_flops, fa_time);
     double fa_v2_gflops = calculate_gflops(total_flops, fa_v2_time);
+    double fa_op1_gflops = calculate_gflops(total_flops, fa_op1_time);
+    double fa_op2_gflops = calculate_gflops(total_flops, fa_op2_time);
+    double fa_op3_gflops = calculate_gflops(total_flops, fa_op3_time);
     double cpu_gflops = calculate_gflops(total_flops, cpu_time);
     
     // === Performance comparison ===
@@ -306,12 +453,19 @@ int main(int argc, char** argv) {
     printf("fa_v2 kernel time: %.3f ms (%.2f GFLOPS, vs CPU speedup: %.2fx)\n", 
            fa_v2_time, fa_v2_gflops, cpu_time / fa_v2_time);
     printf("fa_v2 vs fa speedup: %.2fx\n", fa_time / fa_v2_time);
+    printf("fa_op1 kernel time: %.3f ms (%.2f GFLOPS, vs CPU speedup: %.2fx)\n", 
+           fa_op1_time, fa_op1_gflops, cpu_time / fa_op1_time);
+    printf("fa_op2 kernel time: %.3f ms (%.2f GFLOPS, vs CPU speedup: %.2fx)\n", 
+           fa_op2_time, fa_op2_gflops, cpu_time / fa_op2_time);
+    printf("fa_op2 vs fa speedup: %.2fx\n", fa_time / fa_op2_time);
+    printf("fa_op3 kernel time: %.3f ms (%.2f GFLOPS, vs CPU speedup: %.2fx)\n", 
+           fa_op3_time, fa_op3_gflops, cpu_time / fa_op3_time);
     
     // === Result sample comparison ===
     printf("\n==== Result Sample Comparison (First 10 elements) ====\n");
     for (int i = 0; i < 10; i++) {
-        printf("idx %d: CPU=%.6f, fa=%.6f, fa_v2=%.6f\n", 
-               i, cpu_result[i], h_O1[i], h_O2[i]);
+        printf("idx %d: CPU=%.6f, fa=%.6f, fa_v2=%.6f, fa_op1=%.6f, fa_op2=%.6f, fa_op3=%.6f\n", 
+               i, cpu_result[i], h_O1[i], h_O2[i], h_O3[i], h_O4[i], h_O5[i]);
     }
     
     // Free resources
@@ -323,10 +477,19 @@ int main(int argc, char** argv) {
     free(h_v);
     free(h_O1);
     free(h_O2);
+    free(h_O3);
+    free(h_O4);
+    free(h_O5);
     free(h_L1);
     free(h_L2);
+    free(h_L3);
+    free(h_L4);
+    free(h_L5);
     free(h_M1);
     free(h_M2);
+    free(h_M3);
+    free(h_M4);
+    free(h_M5);
     free(cpu_result);
     
     cudaFree(dev_q);
@@ -338,6 +501,15 @@ int main(int argc, char** argv) {
     cudaFree(dev_O2);
     cudaFree(dev_L2);
     cudaFree(dev_M2);
+    cudaFree(dev_O3);
+    cudaFree(dev_L3);
+    cudaFree(dev_M3);
+    cudaFree(dev_O4);
+    cudaFree(dev_L4);
+    cudaFree(dev_M4);
+    cudaFree(dev_O5);
+    cudaFree(dev_L5);
+    cudaFree(dev_M5);
     
     return 0;
 } 

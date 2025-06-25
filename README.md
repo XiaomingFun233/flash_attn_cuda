@@ -23,7 +23,7 @@ To run the program / 运行程序:
 To compile the benchmark program that compares fa and fa_v2 / 编译比较fa和fa_v2性能的基准测试程序:
 
 ```bash
-nvcc -o ben benchmark.cu flash_kernels.cu -I.
+nvcc -o ben benchmark.cu flash_kernels.cu
 ```
 
 To run the benchmark / 运行基准测试:
